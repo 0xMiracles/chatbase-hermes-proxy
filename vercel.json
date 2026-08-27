@@ -1,0 +1,20 @@
+{
+  "rewrites": [
+    {
+      "source": "/v1/chat/completions",
+      "destination": "/api/chat/completions"
+    },
+    {
+      "source": "/chat/completions",
+      "destination": "/api/chat/completions"
+    },
+    {
+      "source": "/v1/models",
+      "destination": "/api/models"
+    },
+    {
+      "source": "/models",
+      "destination": "/api/models"
+    }
+  ]
+}
