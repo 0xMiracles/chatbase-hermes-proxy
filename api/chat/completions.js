@@ -167,19 +167,11 @@ export default async function handler(req, res) {
       });
     }
 
-    const answer =
-      chatbaseData.text ||
-      chatbaseData.message ||
-      chatbaseData.response ||
-      chatbaseData.answer ||
-      chatbaseData.data?.text ||
-      chatbaseData.data?.message ||
-      chatbaseData.data?.response ||
-      "";
+    const answer = extractChatbaseAnswer(chatbaseData);
 
     if (!answer) {
       console.error("Empty answer from Chatbase", {
-        chatbaseData
+        chatbaseData: JSON.stringify(chatbaseData, null, 2)
       });
 
       return res.status(500).json({
@@ -302,3 +294,51 @@ function extractText(content) {
 
   return "";
 }
+
+function extractChatbaseAnswer(chatbaseData) {
+  if (!chatbaseData) return "";
+
+  // Старые или простые форматы
+  if (typeof chatbaseData.text === "string") return chatbaseData.text.trim();
+  if (typeof chatbaseData.message === "string") return chatbaseData.message.trim();
+  if (typeof chatbaseData.response === "string") return chatbaseData.response.trim();
+  if (typeof chatbaseData.answer === "string") return chatbaseData.answer.trim();
+
+  if (typeof chatbaseData.data?.text === "string") return chatbaseData.data.text.trim();
+  if (typeof chatbaseData.data?.message === "string") return chatbaseData.data.message.trim();
+  if (typeof chatbaseData.data?.response === "string") return chatbaseData.data.response.trim();
+  if (typeof chatbaseData.data?.answer === "string") return chatbaseData.data.answer.trim();
+
+  // Новый формат Chatbase API v2: data.parts
+  const parts = chatbaseData.data?.parts;
+
+  if (Array.isArray(parts)) {
+    const text = parts
+      .map((part) => {
+        if (!part) return "";
+
+        if (typeof part === "string") return part;
+
+        if (typeof part.text === "string") return part.text;
+        if (typeof part.content === "string") return part.content;
+        if (typeof part.value === "string") return part.value;
+
+        if (part.type === "text" && typeof part.text === "string") {
+          return part.text;
+        }
+
+        if (part.type === "text" && typeof part.content === "string") {
+          return part.content;
+        }
+
+        return "";
+      })
+      .join("\n")
+      .trim();
+
+    if (text) return text;
+  }
+
+  return "";
+}
+
