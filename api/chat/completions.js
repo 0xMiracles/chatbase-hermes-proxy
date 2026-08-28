@@ -1,285 +1,312 @@
-function getBearerToken(req) {
-  const header = req.headers.authorization || "";
-  if (!header.toLowerCase().startsWith("bearer ")) return "";
-  return header.slice(7).trim();
-}
-
-function sanitizeUserId(value) {
-  const raw = String(value || "hermes_user");
-  return raw.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 80) || "hermes_user";
-}
-
-function contentToText(content) {
-  if (typeof content === "string") return content;
-
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === "string") return part;
-        if (part?.type === "text") return part.text || "";
-        if (part?.text) return part.text;
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-
-  if (content && typeof content === "object") {
-    return content.text || JSON.stringify(content);
-  }
-
-  return "";
-}
-
-function buildChatbaseMessage(messages) {
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return "";
-  }
-
-  const cleaned = messages
-    .map((m) => {
-      const role = m.role || "user";
-      const text = contentToText(m.content).trim();
-      if (!text) return null;
-      return `${role}: ${text}`;
-    })
-    .filter(Boolean);
-
-  if (cleaned.length === 0) return "";
-
-  return [
-    "Ниже история диалога из Hermes.",
-    "Ответь на последнее сообщение пользователя, учитывая контекст.",
-    "",
-    cleaned.join("\n")
-  ].join("\n");
-}
-
-function extractAnswer(chatbaseData) {
-  const parts = chatbaseData?.data?.parts || [];
-
-  const text = parts
-    .filter((p) => p.type === "text")
-    .map((p) => p.text || "")
-    .join("\n")
-    .trim();
-
-  if (text) return text;
-
-  const toolCall = parts.find((p) => p.type === "tool-call");
-  if (toolCall) {
-    return "Агент запросил выполнение действия, но этот proxy пока поддерживает только текстовые ответы.";
-  }
-
-  return "";
-}
-
-function sendOpenAIJson(res, { id, model, answer, finishReason }) {
-  return res.status(200).json({
-    id: id || `chatcmpl_${Date.now()}`,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model: model || "chatbase",
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          content: answer || ""
-        },
-        finish_reason: finishReason || "stop"
-      }
-    ]
-  });
-}
-
-function sendOpenAIStream(res, { id, model, answer }) {
-  const responseId = id || `chatcmpl_${Date.now()}`;
-  const created = Math.floor(Date.now() / 1000);
-  const usedModel = model || "chatbase";
-
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive"
-  });
-
-  res.write(
-    `data: ${JSON.stringify({
-      id: responseId,
-      object: "chat.completion.chunk",
-      created,
-      model: usedModel,
-      choices: [
-        {
-          index: 0,
-          delta: {
-            role: "assistant"
-          },
-          finish_reason: null
-        }
-      ]
-    })}\n\n`
-  );
-
-  res.write(
-    `data: ${JSON.stringify({
-      id: responseId,
-      object: "chat.completion.chunk",
-      created,
-      model: usedModel,
-      choices: [
-        {
-          index: 0,
-          delta: {
-            content: answer || ""
-          },
-          finish_reason: null
-        }
-      ]
-    })}\n\n`
-  );
-
-  res.write(
-    `data: ${JSON.stringify({
-      id: responseId,
-      object: "chat.completion.chunk",
-      created,
-      model: usedModel,
-      choices: [
-        {
-          index: 0,
-          delta: {},
-          finish_reason: "stop"
-        }
-      ]
-    })}\n\n`
-  );
-
-  res.write("data: [DONE]\n\n");
-  res.end();
-}
-
 export default async function handler(req, res) {
-  if (req.method === "OPTIONS") {
+  try {
+    // CORS
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-    return res.status(204).end();
-  }
 
-  if (req.method !== "POST") {
-    return res.status(405).json({
-      error: {
-        message: "Method not allowed"
-      }
-    });
-  }
-
-  try {
-    const proxyKey = process.env.PROXY_API_KEY;
-
-    if (proxyKey) {
-      const providedKey = getBearerToken(req);
-
-      if (providedKey !== proxyKey) {
-        return res.status(401).json({
-          error: {
-            message: "Invalid proxy API key",
-            type: "authentication_error"
-          }
-        });
-      }
+    if (req.method === "OPTIONS") {
+      return res.status(204).end();
     }
 
-    const chatbaseApiKey = process.env.CHATBASE_API_KEY;
-    const chatbaseAgentId = process.env.CHATBASE_AGENT_ID;
+    if (req.method !== "POST") {
+      return res.status(405).json({
+        error: {
+          message: "Method not allowed",
+          type: "method_error"
+        }
+      });
+    }
 
-    if (!chatbaseApiKey || !chatbaseAgentId) {
+    const CHATBASE_API_KEY = process.env.CHATBASE_API_KEY;
+    const CHATBASE_AGENT_ID = process.env.CHATBASE_AGENT_ID;
+    const PROXY_API_KEY = process.env.PROXY_API_KEY;
+
+    if (!CHATBASE_API_KEY) {
+      console.error("Missing env: CHATBASE_API_KEY");
       return res.status(500).json({
         error: {
-          message: "Proxy is not configured. Missing CHATBASE_API_KEY or CHATBASE_AGENT_ID."
+          message: "Missing CHATBASE_API_KEY",
+          type: "server_error"
+        }
+      });
+    }
+
+    if (!CHATBASE_AGENT_ID) {
+      console.error("Missing env: CHATBASE_AGENT_ID");
+      return res.status(500).json({
+        error: {
+          message: "Missing CHATBASE_AGENT_ID",
+          type: "server_error"
+        }
+      });
+    }
+
+    if (!PROXY_API_KEY) {
+      console.error("Missing env: PROXY_API_KEY");
+      return res.status(500).json({
+        error: {
+          message: "Missing PROXY_API_KEY",
+          type: "server_error"
+        }
+      });
+    }
+
+    const authHeader = req.headers.authorization || "";
+    const incomingKey = authHeader.replace(/^Bearer\s+/i, "").trim();
+
+    if (incomingKey !== PROXY_API_KEY) {
+      console.error("Invalid proxy API key");
+      return res.status(401).json({
+        error: {
+          message: "Invalid proxy API key",
+          type: "authentication_error"
         }
       });
     }
 
     const body = req.body || {};
-    const messages = body.messages || [];
-    const model = body.model || "chatbase";
+    const messages = Array.isArray(body.messages) ? body.messages : [];
     const wantsStream = body.stream === true;
 
-    const message = buildChatbaseMessage(messages);
-
-    if (!message) {
+    if (!messages.length) {
+      console.error("No messages provided");
       return res.status(400).json({
         error: {
-          message: "No message content found"
+          message: "No messages provided",
+          type: "invalid_request_error"
         }
       });
     }
 
-    const userId = sanitizeUserId(
+    const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
+
+    if (!lastUserMessage) {
+      console.error("No user message found");
+      return res.status(400).json({
+        error: {
+          message: "No user message found",
+          type: "invalid_request_error"
+        }
+      });
+    }
+
+    const messageText = extractText(lastUserMessage.content);
+
+    if (!messageText) {
+      console.error("No message content found");
+      return res.status(400).json({
+        error: {
+          message: "No message content found",
+          type: "invalid_request_error"
+        }
+      });
+    }
+
+    const conversationId =
+      body.conversationId ||
+      body.conversation_id ||
       body.user ||
       body.userId ||
-      req.headers["x-user-id"] ||
-      "hermes_user"
-    );
+      `hermes-${Date.now()}`;
 
-    const chatbaseResponse = await fetch(
-      `https://www.chatbase.co/api/v2/agents/${chatbaseAgentId}/chat`,
-      {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${chatbaseApiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          message,
-          stream: false,
-          userId
-        })
-      }
-    );
+    const userId =
+      body.user ||
+      body.userId ||
+      "hermes-user";
 
-    const chatbaseData = await chatbaseResponse.json().catch(() => null);
+    const chatbaseUrl = `https://www.chatbase.co/api/v2/agents/${CHATBASE_AGENT_ID}/chat`;
+
+    console.log("Calling Chatbase API", {
+      url: chatbaseUrl,
+      hasApiKey: Boolean(CHATBASE_API_KEY),
+      agentId: CHATBASE_AGENT_ID,
+      conversationId,
+      userId,
+      wantsStream
+    });
+
+    const chatbaseResponse = await fetch(chatbaseUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CHATBASE_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        message: messageText,
+        stream: false,
+        conversationId,
+        userId
+      })
+    });
+
+    const rawText = await chatbaseResponse.text();
 
     if (!chatbaseResponse.ok) {
-      return res.status(chatbaseResponse.status).json({
+      console.error("Chatbase API error", {
+        status: chatbaseResponse.status,
+        response: rawText
+      });
+
+      return res.status(500).json({
         error: {
-          message:
-            chatbaseData?.error?.message ||
-            "Chatbase API request failed",
-          code: chatbaseData?.error?.code || "CHATBASE_API_ERROR"
+          message: "Chatbase API request failed",
+          type: "upstream_error",
+          status: chatbaseResponse.status,
+          details: rawText
         }
       });
     }
 
-    const answer = extractAnswer(chatbaseData);
-    const messageId = chatbaseData?.data?.id;
-    const finishReason =
-      chatbaseData?.data?.metadata?.finishReason === "tool-calls"
-        ? "tool_calls"
-        : "stop";
+    let chatbaseData;
+    try {
+      chatbaseData = JSON.parse(rawText);
+    } catch (error) {
+      console.error("Failed to parse Chatbase response", {
+        rawText
+      });
 
-    if (wantsStream) {
-      return sendOpenAIStream(res, {
-        id: messageId,
-        model,
-        answer
+      return res.status(500).json({
+        error: {
+          message: "Failed to parse Chatbase response",
+          type: "parse_error",
+          details: rawText
+        }
       });
     }
 
-    return sendOpenAIJson(res, {
-      id: messageId,
+    const answer =
+      chatbaseData.text ||
+      chatbaseData.message ||
+      chatbaseData.response ||
+      chatbaseData.answer ||
+      chatbaseData.data?.text ||
+      chatbaseData.data?.message ||
+      chatbaseData.data?.response ||
+      "";
+
+    if (!answer) {
+      console.error("Empty answer from Chatbase", {
+        chatbaseData
+      });
+
+      return res.status(500).json({
+        error: {
+          message: "Empty answer from Chatbase",
+          type: "upstream_error",
+          details: chatbaseData
+        }
+      });
+    }
+
+    const id = `chatcmpl_${Date.now()}`;
+    const created = Math.floor(Date.now() / 1000);
+    const model = body.model || "chatbase";
+
+    // Если Hermes запросил stream=true, отдаём OpenAI-compatible SSE.
+    if (wantsStream) {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive"
+      });
+
+      const firstChunk = {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              role: "assistant",
+              content: answer
+            },
+            finish_reason: null
+          }
+        ]
+      };
+
+      const finalChunk = {
+        id,
+        object: "chat.completion.chunk",
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: "stop"
+          }
+        ]
+      };
+
+      res.write(`data: ${JSON.stringify(firstChunk)}\n\n`);
+      res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+      res.write("data: [DONE]\n\n");
+      return res.end();
+    }
+
+    // Обычный non-streaming OpenAI-compatible ответ.
+    return res.status(200).json({
+      id,
+      object: "chat.completion",
+      created,
       model,
-      answer,
-      finishReason
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant",
+            content: answer
+          },
+          finish_reason: "stop"
+        }
+      ],
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0
+      }
     });
   } catch (error) {
+    console.error("Unhandled proxy error", {
+      message: error.message,
+      stack: error.stack
+    });
+
     return res.status(500).json({
       error: {
-        message: "Proxy error"
+        message: "Unhandled proxy error",
+        type: "server_error"
       }
     });
   }
+}
+
+function extractText(content) {
+  if (!content) return "";
+
+  if (typeof content === "string") {
+    return content.trim();
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((part) => {
+        if (typeof part === "string") return part;
+        if (part.type === "text") return part.text || "";
+        if (part.text) return part.text;
+        return "";
+      })
+      .join("\n")
+      .trim();
+  }
+
+  if (typeof content === "object") {
+    return content.text || "";
+  }
+
+  return "";
 }
