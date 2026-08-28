@@ -1,23 +1,10 @@
-function getBearerToken(req) {
-  const header = req.headers.authorization || "";
-  if (!header.toLowerCase().startsWith("bearer ")) return "";
-  return header.slice(7).trim();
-}
-
 export default async function handler(req, res) {
-  const proxyKey = process.env.PROXY_API_KEY;
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-  if (proxyKey) {
-    const providedKey = getBearerToken(req);
-
-    if (providedKey !== proxyKey) {
-      return res.status(401).json({
-        error: {
-          message: "Invalid proxy API key",
-          type: "authentication_error"
-        }
-      });
-    }
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
   }
 
   return res.status(200).json({
@@ -26,7 +13,7 @@ export default async function handler(req, res) {
       {
         id: "chatbase",
         object: "model",
-        created: Math.floor(Date.now() / 1000),
+        created: 0,
         owned_by: "chatbase"
       }
     ]
