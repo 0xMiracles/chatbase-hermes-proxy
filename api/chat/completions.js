@@ -103,13 +103,6 @@ export default async function handler(req, res) {
       });
     }
 
-    const conversationId =
-      body.conversationId ||
-      body.conversation_id ||
-      body.user ||
-      body.userId ||
-      `hermes-${Date.now()}`;
-
     const userId =
       body.user ||
       body.userId ||
@@ -121,7 +114,6 @@ export default async function handler(req, res) {
       url: chatbaseUrl,
       hasApiKey: Boolean(CHATBASE_API_KEY),
       agentId: CHATBASE_AGENT_ID,
-      conversationId,
       userId,
       wantsStream
     });
@@ -135,9 +127,9 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         message: messageText,
         stream: false,
-        conversationId,
         userId
       })
+
     });
 
     const rawText = await chatbaseResponse.text();
